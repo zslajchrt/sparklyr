@@ -30,4 +30,8 @@ object utils {
   def readColumnDefault(rdd: RDD[Row]): Array[Any] = {
     rdd.map(row => row(0)).collect()
   }
+
+  def listOfListsToListOfRows(rows: List[List[String]]): List[Row] {
+    rows.map(r => org.apache.spark.sql.Row.fromSeq(r))
+  }
 }

@@ -223,24 +223,71 @@ spark_api_data_frame <- function(api, sqlResult) {
   df
 }
 
+# Map top level R type to SQL type
+spark_api_get_internal_type <- function(x) {
+  # class of POSIXlt is c("POSIXlt" "POSIXt")
+  switch(class(x)[[1]],
+         integer = "integer",
+         character = "string",
+         logical = "boolean",
+         double = "double",
+         numeric = "double",
+         raw = "binary",
+         list = "array",
+         struct = "struct",
+         environment = "map",
+         Date = "date",
+         POSIXlt = "timestamp",
+         POSIXct = "timestamp",
+         stop(paste("Unsupported type for Spark DataFrame:", class(x))))
+}
+
 spark_api_copy_data <- function(api, df, name, repartition) {
   if (!is.numeric(repartition)) {
     stop("The repartition parameter must be an integer")
   }
 
-  # Escaping issues that used to work were broken in Spark 2.0.0-preview, fix:
-  names(df) <- gsub("[^a-zA-Z0-9]", "_", names(df))
+  # SPAKR-SQL does not support '.' in column name, so replace it with '_'
+  # Remove this once SPARK-2775 is fixed
+  names(df) <- gsub("[.]", "_", names(df))
 
-  tempfile <- tempfile(fileext = ".csv")
-  write.csv(df, tempfile, row.names = FALSE, na = "")
+  #new
 
-  columns <- lapply(df, function(e) {
-    if (is.factor(e))
-      "character"
-    else
-      typeof(e)
-  })
-  df <- spark_api_read_csv(api, tempfile, columns)
+  sqlContext <- spark_sql_or_hive(api)
+  schema <- names(df)
+  if (is.null(schema)) {
+    stop("Data frame is expected to have named columns")
+  }
+
+  # drop factors and wrap lists
+  data <- setNames(lapply(df, function(x) {
+    if (is.factor(x)) as.character(x) else x
+  }), NULL)
+
+  # check if all columns have supported type
+  lapply(data, spark_api_get_internal_type)
+
+  # convert to rows
+  args <- list(FUN = list, SIMPLIFY = FALSE, USE.NAMES = FALSE)
+  data <- do.call(mapply, append(args, data))
+
+  scJava <- spark_invoke_static(api$scon, "org.apache.spark.sql.api.r.SQLUtils", "getJavaSparkContext", sqlContext)
+
+  numSlices = 1
+  sliceLen <- ceiling(length(data) / numSlices)
+  slices <- split(data, rep(1: (numSlices + 1), each = sliceLen)[1:length(data)])
+
+  # Serialize each slice: obtain a list of raws, or a list of lists (slices) of
+  # 2-tuples of raws
+  serializedSlices <- lapply(slices, serialize, connection = NULL)
+
+  rddJava <- spark_invoke_static(api$scon, "org.apache.spark.api.r.RRDD", "createRDDFromArray", scJava, serializedSlices)
+
+  rddRow <- getJRDD(lapply(rddJava, function(x) x), "row")
+  srdd <- callJMethod(jrdd, "rdd")
+  sdf <- callJStatic("org.apache.spark.sql.api.r.SQLUtils", "createDF",
+                     srdd, schema$jobj, sqlContext)
+  #/new
 
   if (repartition > 0) {
     df <- spark_invoke(df, "repartition", as.integer(repartition))
