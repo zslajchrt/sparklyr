@@ -32,12 +32,63 @@ object utils {
     rdd.map(row => row(0)).collect()
   }
 
-  def listOfListsToListOfRows3(sc: SparkContext, rows: Array[_], partitions: Int): RDD[Row] = {
-      var data = rows.map(o => {
-        val r = o.asInstanceOf[Array[_]]
-        org.apache.spark.sql.Row.fromSeq(r)
+  def createDataFrame2(sc: SparkContext, cols: Array[Array[_]], partitions: Int): Any = {
+    if (cols.length == 0) {
+      return(
+        sc.parallelize(Array(Row()), 1)
+      )
+    }
+
+    val columnCount = cols.length
+
+    val firstRow = cols(1).asInstanceOf[Array[_]]
+    val rowsCount = firstRow.length
+
+    val rows = List.range(0, rowsCount).map(r => {
+      List.range(0, columnCount).map(c => {
+        cols(c)(r)
       })
+    })
+
+    val data = rows.map(o => {
+      Row.fromSeq(o)
+    })
 
     sc.parallelize(data, partitions)
+  }
+
+  def createDataFrame(sc: SparkContext, cols: Array[_], partitions: Int): RDD[Row] = {
+    if (cols.length == 0) {
+      return(
+        sc.parallelize(Array(Row()), 1)
+      )
+    }
+
+    val columnCount = cols.length
+
+    val firstRow = cols(1).asInstanceOf[Array[_]]
+    val rowsCount = firstRow.length
+
+    val rows = List.range(0, rowsCount).map(r => {
+      List.range(0, columnCount).map(c => {
+        val col = cols(c).asInstanceOf[Array[_]]
+        col(r)
+      })
+    })
+
+    val data = rows.map(o => {
+      val r = o.asInstanceOf[Array[_]]
+      Row.fromSeq(r)
+    })
+
+    sc.parallelize(data, partitions)
+  }
+
+  def getClass(x: Any): Any = {
+    x.getClass.getSimpleName
+  }
+
+  def getClasses(x: Array[_]): Array[Any] = {
+    x.map(e => e.getClass.getSimpleName)
   }
 }

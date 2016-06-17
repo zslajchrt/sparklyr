@@ -258,14 +258,14 @@ spark_api_copy_data <- function(api, df, name, repartition, useCsv = FALSE) {
   } else {
     structType <- spark_api_build_types(api, columns)
 
-    rows <- lapply(seq_len(NROW(df)), function(e) as.list(df[e,]))
+    data <- lapply(as.list(df), function(e) as.list(e))
 
     rdd <- spark_invoke_static(
       api$scon,
       "utils",
-      "listOfListsToListOfRows3",
+      "createDataFrame2",
       spark_context(sc),
-      rows,
+      data,
       as.integer(if (repartition <= 0) 1 else repartition)
     )
 
