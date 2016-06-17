@@ -5,6 +5,7 @@ import org.apache.spark.mllib.linalg.Vector
 import org.apache.spark.mllib.linalg.distributed.RowMatrix
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql._
+import org.apache.spark.SparkContext
 
 object utils {
 
@@ -31,7 +32,12 @@ object utils {
     rdd.map(row => row(0)).collect()
   }
 
-  def listOfListsToListOfRows(rows: List[List[String]]): List[Row] {
-    rows.map(r => org.apache.spark.sql.Row.fromSeq(r))
+  def listOfListsToListOfRows3(sc: SparkContext, rows: Array[_], partitions: Int): RDD[Row] = {
+      var data = rows.map(o => {
+        val r = o.asInstanceOf[Array[_]]
+        org.apache.spark.sql.Row.fromSeq(r)
+      })
+
+    sc.parallelize(data, partitions)
   }
 }
