@@ -1,5 +1,9 @@
 args <- commandArgs(trailingOnly=TRUE)
 
+if (identical(Sys.getenv("SPARK_VERSION_LATEST"), "false")) {
+  sparklyr::spark_versions(FALSE)
+}
+
 if (length(args) == 0) {
   stop("Missing arguments")
 } else if (args[[1]] == "--testthat") {
