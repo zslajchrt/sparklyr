@@ -598,6 +598,33 @@ core_invoke_method <- function(sc, static, object, method, ...)
   attach_connection(object, sc)
 }
 
+polyglot_invoke_method <- function(static, object, method, ...) {
+  args <- list(...)
+
+  # TODO: A workaround to having empty maps generated for lists with anonymous elements
+  fixArgs <- function(args) {
+	  lapply(args, function(a) {
+		  if (is.list(a) && is.null(names(a))) {
+			  names(a) <- 1:length(a)
+      }
+      a
+    })
+  }
+  args <- fixArgs(args)
+
+  if (!static) {
+    rcv <- object
+  } else {
+    rcv <- java.type(object)
+  }
+
+  m <- rcv[method]
+  if (is.na(m)) {
+    stop(paste0("Unknown method:", method))
+  }
+  do.call(function(...) m(...), args)
+}
+
 jobj_subclass.shell_backend <- function(con) {
   "shell_jobj"
 }
@@ -1052,17 +1079,29 @@ worker_config_deserialize <- function(raw) {
 }
 # nocov start
 
-spark_worker_apply <- function(sc, config) {
-  hostContextId <- worker_invoke_method(sc, FALSE, "Handler", "getHostContext")
-  worker_log("retrieved worker context id ", hostContextId)
+unserialize <- function(connection, refhook = NULL) {
+  if (typeof(connection) == "polyglot.value") {
+    connection <- as.raw(connection)
+  }
+  base::unserialize(connection, refhook)
+}
 
-  context <- structure(
-    class = c("spark_jobj", "shell_jobj"),
-    list(
-      id = hostContextId,
-      connection = sc
+
+spark_worker_apply <- function(sc, config) {
+  if (typeof(sc) == "polyglot.value") {
+    context <- sc
+  } else {
+    hostContextId <- worker_invoke_method(sc, FALSE, "Handler", "getHostContext")
+    worker_log("retrieved worker context id ", hostContextId)
+
+    context <- structure(
+      class = c("spark_jobj", "shell_jobj"),
+      list(
+        id = hostContextId,
+        connection = sc
+      )
     )
-  )
+  }
 
   worker_log("retrieved worker context")
 
@@ -1102,7 +1141,11 @@ spark_worker_apply <- function(sc, config) {
   length <- worker_invoke(context, "getSourceArrayLength")
   worker_log("found ", length, " rows")
 
-  groups <- worker_invoke(context, if (grouped) "getSourceArrayGroupedSeq" else "getSourceArraySeq")
+  if (typeof(sc) == "polyglot.value") {
+    groups <- worker_invoke(context, if (grouped) "getSourceArrayGroupedArray" else "getSourceArrayArray")
+  } else {
+    groups <- worker_invoke(context, if (grouped) "getSourceArrayGroupedSeq" else "getSourceArraySeq")
+  }
   worker_log("retrieved ", length(groups), " rows")
 
   closureRaw <- worker_invoke(context, "getClosure")
@@ -1200,7 +1243,6 @@ spark_worker_apply <- function(sc, config) {
 
         if("AsIs" %in% class(result)) class(result) <- class(result)[-match("AsIs", class(result))]
         result <- do.call("cbind", list(new_column_values, result))
-
         names(result) <- gsub("\\.", "_", make.unique(names(result)))
       }
       else {
@@ -1224,9 +1266,15 @@ spark_worker_apply <- function(sc, config) {
   if (!is.null(all_results) && nrow(all_results) > 0) {
     worker_log("updating ", nrow(all_results), " rows")
 
-    all_data <- lapply(1:nrow(all_results), function(i) as.list(all_results[i,]))
-
-    worker_invoke(context, "setResultArraySeq", all_data)
+    if (typeof(sc) == "polyglot.value") {
+      dput(all_results)
+      resFact <- sapply(all_results, function(c) if (is.factor(c)) levels(c)  else NA)
+      all_data <- list(data = all_results, factors = resFact, nr = nrow(all_results), columns = names(all_results))
+      sc$setResultArray(all_data)
+    } else {
+      all_data <- lapply(1:nrow(all_results), function(i) as.list(all_results[i,]))
+      worker_invoke(context, "setResultArraySeq", all_data)
+    }
     worker_log("updated ", nrow(all_results), " rows")
   } else {
     worker_log("found no rows in closure result")
@@ -1369,11 +1417,27 @@ worker_connection.spark_jobj <- function(x, ...) {
 
 worker_invoke_method <- function(sc, static, object, method, ...)
 {
-  core_invoke_method(sc, static, object, method, ...)
+  if (typeof(sc) == "polyglot.value") {
+    worker_log("worker_invoke_method-1(", static, method, ")")
+    if (is.character(object) && object == "Handler") {
+      rcv <- sc
+    } else {
+      rcv <- object
+    }
+    res <- tryCatch(.fastr.interop.try(function() polyglot_invoke_method(static, rcv, method, ...), TRUE), error = function(e) { cat(paste0("Polyglot Error: ", e$message, "\n")); stop(paste0("Polyglot error: ", e$message)) })
+    worker_log("worker_invoke_method-2(", static, method, ")")
+    res
+  } else {
+    core_invoke_method(sc, static, object, method, ...)
+  }
 }
 
 worker_invoke <- function(jobj, method, ...) {
   UseMethod("worker_invoke")
+}
+
+worker_invoke.default <- function(polyglotObj, method, ...) {
+  tryCatch(.fastr.interop.try(function() polyglot_invoke_method(FALSE, polyglotObj, method, ...), TRUE), error = function(e) { cat(paste0("Polyglot Error: ", e$message, "\n")); stop(paste0("Polyglot error: ", e$message)) })
 }
 
 worker_invoke.shell_jobj <- function(jobj, method, ...) {
@@ -1440,7 +1504,8 @@ worker_log_error <- function(...) {
 spark_worker_main <- function(
   sessionId,
   backendPort = 8880,
-  configRaw = NULL) {
+  configRaw = NULL,
+  sc = NULL) {
 
   spark_worker_hooks()
 
@@ -1469,10 +1534,12 @@ spark_worker_main <- function(
 
     options(sparklyr.connection.cancellable = FALSE)
 
-    sc <- spark_worker_connect(sessionId, backendPort, config)
-    worker_log("is connected")
+    if (is.null(sc)) {
+      sc <- spark_worker_connect(sessionId, backendPort, config)
+      worker_log("is connected")
+    }
 
-    spark_worker_apply(sc, config)
+    print(system.time(spark_worker_apply(sc, config)))
 
     if (identical(config$profile, TRUE)) {
       # utils::Rprof(NULL)
@@ -1510,7 +1577,12 @@ spark_worker_hooks <- function() {
   lock("stop",  as.environment("package:base"))
 }
 
-# nocov end
-do.call(spark_worker_main, as.list(commandArgs(trailingOnly = TRUE)))
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) == 0) {
+  function (sessionId, configRaw, sc) spark_worker_main(sessionId, -1, configRaw, sc)
+} else {
+  # nocov end
+  do.call(spark_worker_main, as.list(commandArgs(trailingOnly = TRUE)))
+}
     """
 }
