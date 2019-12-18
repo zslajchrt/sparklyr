@@ -1,5 +1,13 @@
 package sparklyr
 
+import java.io.{ByteArrayOutputStream, DataOutputStream}
+import java.util
+import java.util.Collections
+
+import org.apache.spark.sql.Row
+import org.graalvm.polyglot.{Context, Value}
+import sun.tracing.dtrace.JVM
+
 /*
  * The Backend class is launched from Spark through spark-submit with the following
  * paramters: port, session and service.
@@ -539,9 +547,101 @@ class Backend() {
   }
 }
 
+class InteropTestClass {
+
+  private var result: Array[Row] = Array[Row]()
+
+  import scala.collection.JavaConversions._
+  def setBBB(s: java.util.Map[String, Any]): Unit = {
+    println(s)
+  }
+
+  def setAAA(s: java.util.Map[String, Any]): Unit = {
+    val nr = s.get("nr").asInstanceOf[Number].intValue()
+    if (nr == 0) {
+      result = Array[Row]()
+      return
+    }
+    val columnNames = s.get("columns").asInstanceOf[java.util.List[String]]
+    val nc = columnNames.size()
+    val data: java.util.Map[String, java.util.List[Any]] = if (nr > 1) {
+      s.get("data").asInstanceOf[java.util.Map[String, java.util.List[Any]]]
+    } else {
+      val map = s.get("data").asInstanceOf[util.Map[String, Any]]
+      val dest = new util.HashMap[String, java.util.List[Any]]()
+      map.entrySet().foreach(entry => dest.put(entry.getKey, Collections.singletonList(entry.getValue)))
+      dest
+    }
+    val columns = columnNames.map(colName => data.get(colName))
+    val factors = s.get("factors") match {
+        case factorsMap: java.util.Map[_, _] =>
+          columnNames.map(colName => factorsMap.get(colName).asInstanceOf[java.util.List[Any]])
+        case factorList: java.util.List[_] =>
+          (0 until nc).map(c => {
+            val colFact = factorList.get(c)
+            if (colFact == null) {
+              null
+            } else {
+              Collections.singletonList(factorList.get(c))
+            }
+          })
+    }
+
+    val res = new Array[Row](nr)
+    for (i <- 0 until nr) {
+      val row = new Array[Any](nc)
+      for (j <- 0 until nc) {
+        val column: util.List[Any] = columns.get(j)
+        val columnFactors: util.List[_] = factors.get(j)
+        if (columnFactors == null) {
+          row(j) = column.get(i)
+        } else {
+          row(j) = columnFactors.get(column.get(i).asInstanceOf[Number].intValue() - 1) // factors are one-based
+        }
+      }
+      res(i) = Row.fromSeq(row.toSeq)
+    }
+    result = res
+  }
+
+}
+
 object Backend {
   /* Leaving this entry for backward compatibility with databricks */
   def main(args: Array[String]): Unit = {
+    val sourceArray: Array[org.apache.spark.sql.Row] = Array[Row](Row(Seq(Seq("aaa", 1))), Row(Seq(Seq("bbb", 2))))
+    val aaa = sourceArray.map(x => x.toSeq.map(g => g.asInstanceOf[Seq[Any]].toArray).toArray)
+    println(aaa)
+    val graalContext: Context = Context.newBuilder().allowAllAccess(true).build()
+
+//    val closure = graalContext.eval("R", "{fn <- function(x) x + 1; serialize(fn, NULL)}")
+//    val arr = new Array[Byte](closure.getArraySize.asInstanceOf[Int])
+//    for (i <- 0 until closure.getArraySize.asInstanceOf[Int]) {
+//      arr(i)=closure.getArrayElement(i).asByte()
+//    }
+//    val asRaw = graalContext.eval("R", "as.raw")
+//    val unserialize = graalContext.eval("R", "unserialize")
+//    //val closureFn = unserialize.execute(asRaw.execute(closure))
+//    val closureFn = unserialize.execute(arr)
+
+
+    val fn1 = graalContext.eval("R", """
+        function (x) {
+          #emp.data <- structure(list(names = structure(c(1L), .Label = "Sepal_Length|Sepal_Width|Petal_Length|Petal_Width", class = "factor"), types = structure(c(1L), .Label = "numeric|numeric|numeric|numeric", class = "factor")), row.names = c(NA, -1L), class = "data.frame")
+          #emp.data <- structure(list(names = structure(c(1L), .Label = "Sepal_Length|Sepal_Width|Petal_Length|Petal_Width", class = "factor"), types = structure(c(1L), .Label = "numeric|numeric|numeric|numeric", class = "factor")), row.names = c(NA, -1L), class = "data.frame")
+          #resFact <- sapply(emp.data, function(c) if (is.factor(c)) levels(c)  else NA)
+          #x$setAAA(list(data = emp.data, factors = resFact, nr = nrow(emp.data), columns = names(emp.data)))
+          print(x)
+          print(x[[1]])
+          print(x[[1]][[1]])
+          print(x[[1]][[1]][[1]])
+          print(as.list(x))
+        }
+      """)
+    val x = new InteropTestClass()
+    val res = fn1.execute(aaa)
+    println(res)
+
     Shell.main(args)
   }
 }
